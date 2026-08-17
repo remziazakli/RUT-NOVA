@@ -1,0 +1,350 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // =====================================================================
+    // HELPER FUNCTIONS
+    // =====================================================================
+
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isOwner(uid) {
+      return isAuthenticated() && request.auth.uid == uid;
+    }
+
+    function getUserRoles() {
+      return get(/databases/$(database)/documents/userRoles/$(request.auth.uid)).data.roles;
+    }
+
+    function hasRole(role) {
+      return isAuthenticated() && role in getUserRoles();
+    }
+
+    function hasAnyRole(roles) {
+      return isAuthenticated() && getUserRoles().hasAny(roles);
+    }
+
+    function isSuperAdmin() {
+      return hasRole('super_admin');
+    }
+
+    function isAdmin() {
+      return hasAnyRole(['super_admin', 'admin']);
+    }
+
+    function isDietitian() {
+      return hasAnyRole(['super_admin', 'admin', 'dietitian']);
+    }
+
+    function isTeacher() {
+      return hasAnyRole(['super_admin', 'admin', 'teacher']);
+    }
+
+    function isParent() {
+      return hasAnyRole(['super_admin', 'admin', 'parent']);
+    }
+
+    function isStudent() {
+      return hasAnyRole(['super_admin', 'admin', 'student']);
+    }
+
+    function isDietUser() {
+      return hasAnyRole(['super_admin', 'admin', 'diet_user']);
+    }
+
+    function isNotDeleted() {
+      return !('deletedAt' in resource.data) || resource.data.deletedAt == null;
+    }
+
+    function hasValidSubscription() {
+      let userData = get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+      return userData.subscriptionStatus == 'active' ||
+             userData.subscriptionStatus == 'trial' ||
+             isAdmin();
+    }
+
+    function isAssignedDietitian(clientUid) {
+      return isAuthenticated() && exists(
+        /databases/$(database)/documents/userAssignments/$(request.auth.uid + '_' + clientUid)
+      );
+    }
+
+    function isAssignedTeacher(studentUid) {
+      return isAuthenticated() && exists(
+        /databases/$(database)/documents/userAssignments/$(request.auth.uid + '_' + studentUid)
+      );
+    }
+
+    function isAssignedParent(studentUid) {
+      return isAuthenticated() && exists(
+        /databases/$(database)/documents/userAssignments/$(request.auth.uid + '_' + studentUid)
+      );
+    }
+
+    // =====================================================================
+    // USERS
+    // =====================================================================
+
+    match /users/{uid} {
+      allow read: if isOwner(uid) || isAdmin();
+      allow create: if isAdmin();
+      allow update: if isOwner(uid) || isAdmin();
+      allow delete: if isSuperAdmin();
+    }
+
+    // =====================================================================
+    // USER ROLES
+    // =====================================================================
+
+    match /userRoles/{uid} {
+      allow read: if isOwner(uid) || isAdmin();
+      allow write: if isAdmin();
+    }
+
+    // =====================================================================
+    // ROLES (role definitions)
+    // =====================================================================
+
+    match /roles/{roleId} {
+      allow read: if isAuthenticated();
+      allow write: if isSuperAdmin();
+    }
+
+    // =====================================================================
+    // PERMISSIONS
+    // =====================================================================
+
+    match /permissions/{permId} {
+      allow read: if isAuthenticated();
+      allow write: if isSuperAdmin();
+    }
+
+    // =====================================================================
+    // USER ASSIGNMENTS
+    // =====================================================================
+
+    match /userAssignments/{assignId} {
+      allow read: if isAdmin() || 
+                     (isAuthenticated() && resource.data.assignerId == request.auth.uid) ||
+                     (isAuthenticated() && resource.data.assigneeId == request.auth.uid);
+      allow create: if isAdmin();
+      allow update: if isAdmin();
+      allow delete: if isAdmin();
+    }
+
+    // =====================================================================
+    // MODULES
+    // =====================================================================
+
+    match /modules/{moduleId} {
+      allow read: if isAuthenticated();
+      allow write: if isAdmin();
+    }
+
+    // =====================================================================
+    // COURSES
+    // =====================================================================
+
+    match /courses/{courseId} {
+      allow read: if isAuthenticated();
+      allow write: if isAdmin() || isTeacher();
+    }
+
+    // =====================================================================
+    // SUBJECTS
+    // =====================================================================
+
+    match /subjects/{subjectId} {
+      allow read: if isAuthenticated();
+      allow write: if isAdmin() || isTeacher();
+    }
+
+    // =====================================================================
+    // GRADE LEVELS
+    // =====================================================================
+
+    match /gradeLevels/{levelId} {
+      allow read: if isAuthenticated();
+      allow write: if isAdmin();
+    }
+
+    // =====================================================================
+    // STUDY LOGS
+    // =====================================================================
+
+    match /studyLogs/{logId} {
+      allow read: if isAdmin() ||
+                     isOwner(resource.data.studentId) ||
+                     (isTeacher() && isAssignedTeacher(resource.data.studentId)) ||
+                     (isParent() && isAssignedParent(resource.data.studentId));
+      allow create: if isAuthenticated() && 
+                       request.resource.data.studentId == request.auth.uid &&
+                       hasValidSubscription();
+      allow update: if isOwner(resource.data.studentId) || isAdmin() || 
+                       (isTeacher() && isAssignedTeacher(resource.data.studentId));
+      allow delete: if isAdmin();
+    }
+
+    // =====================================================================
+    // STUDY PLANS
+    // =====================================================================
+
+    match /studyPlans/{planId} {
+      allow read: if isAdmin() ||
+                     isOwner(resource.data.studentId) ||
+                     (isTeacher() && isAssignedTeacher(resource.data.studentId)) ||
+                     (isParent() && isAssignedParent(resource.data.studentId));
+      allow write: if isAdmin() || isTeacher();
+    }
+
+    // =====================================================================
+    // ASSIGNMENTS (teacher-given tasks)
+    // =====================================================================
+
+    match /assignments/{assignId} {
+      allow read: if isAdmin() ||
+                     isOwner(resource.data.studentId) ||
+                     (isTeacher() && isAssignedTeacher(resource.data.studentId)) ||
+                     (isParent() && isAssignedParent(resource.data.studentId));
+      allow create: if isAdmin() || isTeacher();
+      allow update: if isAdmin() || 
+                       isTeacher() ||
+                       (isOwner(resource.data.studentId) && 
+                        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['completedAt', 'status']));
+      allow delete: if isAdmin() || isTeacher();
+    }
+
+    // =====================================================================
+    // UPLOADED QUESTIONS
+    // =====================================================================
+
+    match /uploadedQuestions/{qId} {
+      allow read: if isAdmin() ||
+                     isOwner(resource.data.studentId) ||
+                     (isTeacher() && isAssignedTeacher(resource.data.studentId)) ||
+                     (isParent() && isAssignedParent(resource.data.studentId));
+      allow create: if isAuthenticated() && 
+                       request.resource.data.studentId == request.auth.uid &&
+                       hasValidSubscription();
+      allow update: if isOwner(resource.data.studentId) || isAdmin() || isTeacher();
+      allow delete: if isAdmin();
+    }
+
+    // =====================================================================
+    // QUESTION RESPONSES
+    // =====================================================================
+
+    match /questionResponses/{rId} {
+      allow read: if isAdmin() ||
+                     (isAuthenticated() && resource.data.studentId == request.auth.uid) ||
+                     (isTeacher() && resource.data.teacherId == request.auth.uid) ||
+                     (isParent() && isAssignedParent(resource.data.studentId));
+      allow create: if isTeacher() || isAdmin();
+      allow update: if isAdmin() || 
+                       (isTeacher() && resource.data.teacherId == request.auth.uid);
+      allow delete: if isAdmin();
+    }
+
+    // =====================================================================
+    // MEAL LOGS
+    // =====================================================================
+
+    match /mealLogs/{logId} {
+      allow read: if isAdmin() ||
+                     isOwner(resource.data.userId) ||
+                     (isDietitian() && isAssignedDietitian(resource.data.userId));
+      allow create: if isAuthenticated() && 
+                       request.resource.data.userId == request.auth.uid &&
+                       hasValidSubscription();
+      allow update: if isOwner(resource.data.userId) || isAdmin() || 
+                       (isDietitian() && isAssignedDietitian(resource.data.userId));
+      allow delete: if isAdmin();
+    }
+
+    // =====================================================================
+    // DIET PLANS
+    // =====================================================================
+
+    match /dietPlans/{planId} {
+      allow read: if isAdmin() ||
+                     isOwner(resource.data.userId) ||
+                     (isDietitian() && resource.data.dietitianId == request.auth.uid);
+      allow write: if isAdmin() || isDietitian();
+    }
+
+    // =====================================================================
+    // HEALTH MEASUREMENTS
+    // =====================================================================
+
+    match /healthMeasurements/{mId} {
+      allow read: if isAdmin() ||
+                     isOwner(resource.data.userId) ||
+                     (isDietitian() && isAssignedDietitian(resource.data.userId));
+      allow create: if isAuthenticated() && 
+                       request.resource.data.userId == request.auth.uid;
+      allow update: if isOwner(resource.data.userId) || isAdmin() || isDietitian();
+      allow delete: if isAdmin();
+    }
+
+    // =====================================================================
+    // REVIEWS
+    // =====================================================================
+
+    match /reviews/{rId} {
+      allow read: if isAdmin() ||
+                     (isAuthenticated() && resource.data.targetUserId == request.auth.uid) ||
+                     (isDietitian() && resource.data.reviewerId == request.auth.uid) ||
+                     (isTeacher() && resource.data.reviewerId == request.auth.uid) ||
+                     (isParent() && resource.data.visibleToParent == true && 
+                      isAssignedParent(resource.data.targetUserId));
+      allow create: if isDietitian() || isTeacher() || isAdmin();
+      allow update: if isAdmin() || resource.data.reviewerId == request.auth.uid;
+      allow delete: if isAdmin();
+    }
+
+    // =====================================================================
+    // NOTIFICATIONS
+    // =====================================================================
+
+    match /notifications/{nId} {
+      allow read: if isOwner(resource.data.recipientId) || isAdmin();
+      allow create: if isAdmin() || isTeacher() || isDietitian();
+      allow update: if isOwner(resource.data.recipientId) || isAdmin();
+      allow delete: if isAdmin();
+    }
+
+    // =====================================================================
+    // SYSTEM SETTINGS
+    // =====================================================================
+
+    match /systemSettings/{docId} {
+      allow read: if true; // public - site name, logo etc.
+      allow write: if isAdmin();
+    }
+
+    // =====================================================================
+    // ACTIVITY LOGS
+    // =====================================================================
+
+    match /activityLogs/{lId} {
+      allow read: if isAdmin();
+      allow create: if isAuthenticated();
+      allow update: if false;
+      allow delete: if isSuperAdmin();
+    }
+
+    // =====================================================================
+    // AI SERVICE QUEUE (future use)
+    // =====================================================================
+
+    match /aiServiceQueue/{qId} {
+      allow read: if isAdmin();
+      allow create: if isAuthenticated();
+      allow update: if isAdmin();
+      allow delete: if isAdmin();
+    }
+  }
+}
